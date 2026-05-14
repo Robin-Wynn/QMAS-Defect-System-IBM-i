@@ -1,0 +1,129 @@
+      *================================================================*
+      * DDS:     QMASDSPF                                              *
+      * PURPOSE: Display file for QMAS Interactive Program (QMASINT)  *
+      *                                                                *
+      * Record Formats:                                                *
+      *   MENU01    - Screen 1: Main Menu & Filters                   *
+      *   SFLRCD    - Screen 2: Subfile Record (one row per defect)   *
+      *   SFLCTL    - Screen 2: Subfile Control                       *
+      *   DETAIL01  - Screen 3: Detail Drill-Down                     *
+      *================================================================*
+      *
+      * File-level keywords
+      *
+     A                                      DSPSIZ(24 80 *DS3)
+     A                                      CA03(03 'F3=EXIT')
+     A                                      CA05(05 'F5=REFRESH')
+     A                                      CA12(12 'F12=GO BACK')
+      *
+      *================================================================*
+      * SCREEN 1 - MENU01: Main Menu & Filters                        *
+      *================================================================*
+     A          R MENU01
+      *--- Header -----------------------------------------------------*
+     A                                  1 25'QMAS - DEFECT AUDIT SYSTEM'
+     A                                  1 60DATE
+     A                                  2  1'Production Line:'
+     A                                  3  1'Severity     :'
+     A                                  4  1'Det. Stage   :'
+     A                                  6  1'Enter filter values and press'
+     A                                  6 31'Enter. Leave blank for all.'
+      *--- Filter input fields ----------------------------------------*
+     A            FLTLINE        4A  B  2 18
+     A            FLTSEV         1A  B  3 18
+     A            FLTSTAGE       2A  B  4 18
+      *--- Function key legend ----------------------------------------*
+     A                                 23  2'F3=Exit'
+     A                                 23 12'F5=Refresh'
+     A                                 23 25'Enter=Search'
+      *
+      *================================================================*
+      * SCREEN 2 - SFLRCD: Subfile Record (one row per defect)        *
+      *================================================================*
+     A          R SFLRCD                    SFL
+      *--- Option column (user types '5' to view detail) --------------*
+     A            SFLOPT         1A  B 11  2
+      *--- Display columns --------------------------------------------*
+     A            SFLDEFID       8A  O 11  5
+     A            SFLPARTNO     10A  O 11 15
+     A            SFLLINE        4A  O 11 27
+     A            SFLSEV         1A  O 11 33
+     A            SFLTCOST      12A  O 11 36
+      *--- Hidden RRN for detail lookup -------------------------------*
+     A            SFLRRN         4  0H
+      *
+      *================================================================*
+      * SCREEN 2 - SFLCTL: Subfile Control                            *
+      *================================================================*
+     A          R SFLCTL                    SFLCTL(SFLRCD)
+     A                                      SFLSIZ(0005)
+     A                                      SFLPAG(0005)
+     A                                      OVERLAY
+     A  31                                  SFLDSP
+     A  32                                  SFLDSPCTL
+     A  33                                  SFLCLR
+     A  34                                  SFLEND
+      *--- Header -----------------------------------------------------*
+     A                                  1 30'QMAS - DEFECT LIST'
+     A                                  1 60DATE
+      *--- Active filter display --------------------------------------*
+     A                                  2  1'Line:'
+     A            HDLINE         4A  O  2  7
+     A                                  2 13'Sev:'
+     A            HDSEV          1A  O  2 18
+     A                                  2 21'Stage:'
+     A            HDSTAGE        2A  O  2 28
+      *--- Column headings --------------------------------------------*
+     A                                  9  1'Opt'
+     A                                  9  5'Defect ID'
+     A                                  9 15'Part Number'
+     A                                  9 27'Line'
+     A                                  9 32'Sev'
+     A                                  9 36'Total Cost'
+      *--- Function key legend ----------------------------------------*
+     A*                                23  2'F3=Exit'
+     A*                                23 12'F5=Refresh'
+     A*                                23 25'F12=Go Back'
+     A*                                23 39'5=View Detail'
+     A                                  7  2'F3=Exit F12=Back 5=Detail'
+     A                                      COLOR(PNK)
+      *
+      *================================================================*
+      * SCREEN 3 - DETAIL01: Detail Drill-Down                        *
+      *================================================================*
+     A          R DETAIL01
+      *--- Header -----------------------------------------------------*
+     A                                  1 29'QMAS - DEFECT DETAIL'
+     A                                  1 60DATE
+      *--- Field labels and output fields -----------------------------*
+     A                                  3  2'Defect ID    :'
+     A            DTDEFID        8A  O  3 18
+     A                                  4  2'Part Number  :'
+     A            DTPARTNO      10A  O  4 18
+     A                                  5  2'Prod. Line   :'
+     A            DTLINE         4A  O  5 18
+     A                                  6  2'Type Code    :'
+     A            DTTYPECD       2A  O  6 18
+     A                                  7  2'Type Desc    :'
+     A            DTTYPEDESC    30A  O  7 18
+     A                                  8  2'Severity     :'
+     A            DTSEV          1A  O  8 18
+     A                                  9  2'Base Cost    :'
+     A            DTBCOST       12A  O  9 18
+     A                                 10  2'Det. Stage   :'
+     A            DTSTAGE        2A  O 10 18
+     A                                 11  2'Rework Flag  :'
+     A            DTRWK          1A  O 11 18
+     A                                 12  2'Total Cost   :'
+     A            DTTCOST       13A  O 12 18
+      *--- CRITICAL ESCAPE warning (indicator 50 drives this) ---------*
+     A  50                             14  2'*** CRITICAL ESCAPE ***'
+     A  51                                  DSPATR(BL)
+     A  50                                  COLOR(RED)
+     A  50                             15  2'SEV 1 DEFECT DETECTED AT'
+     A  50                                  COLOR(RED)
+     A  50                             15 27'FINISHED GOODS STAGE'
+     A  50                                  COLOR(RED)
+      *--- Function key legend ----------------------------------------*
+     A                                 23  2'F3=Exit'
+     A                                 23 12'F12=Go Back'

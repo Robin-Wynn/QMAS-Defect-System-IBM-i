@@ -1,0 +1,609 @@
+      *================================================================*
+      * PROGRAM:  QMASBATCH                                            *
+      * PURPOSE:  QMAS Batch Integration - CSV Ingest to DEFECTPF      *
+      * AUTHOR:   Robin Wynn                                           *
+      * DATE:     2026-05-06                                           *
+      *                                                                *
+      * FLOW:                                                          *
+      *   1. Open CSVIN and RPTOUT, write report headers, skip CSV     *
+      *      header row                                                *
+      *   2. Read each comma-delimited record from CSVIN               *
+      *   3. Parse record into individual fields using UNSTRING         *
+      *   4. Validate fields - flag bad records with error message     *
+      *   5. Call QMASTCOST subprogram to calculate TCOST              *
+      *   6. UPSERT (UPDATE or INSERT) into DEFECTPF via Embedded SQL  *
+      *   7. Write control report totals and display batch summary     *
+      *================================================================*
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. QMASBATCH.
+       AUTHOR. Robin.
+
+      *================================================================*
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+
+      *--- CSVIN: Sequential CSV input file in QRSC library -----------*
+           SELECT CSVIN
+               ASSIGN TO "CSVIN"
+               ORGANIZATION IS SEQUENTIAL
+               ACCESS MODE  IS SEQUENTIAL
+               FILE STATUS  IS WS-IN-STATUS.
+
+      *--- RPTOUT: Printer spool file for the control report ----------*
+      *    PRINTER- prefix routes output to the spool queue           *
+           SELECT RPTOUT
+               ASSIGN TO PRINTER-RPTOUT
+               ORGANIZATION IS SEQUENTIAL
+               ACCESS MODE  IS SEQUENTIAL
+               FILE STATUS  IS WS-RPT-STATUS.
+
+      *================================================================*
+       DATA DIVISION.
+       FILE SECTION.
+
+      *--- CSVIN record layout ----------------------------------------*
+      *    Record length must match DSPFD FILE(QRSC/CSVIN) result: 100 *
+       FD  CSVIN
+           LABEL RECORDS ARE STANDARD
+           RECORD CONTAINS 100 CHARACTERS.
+       01  RAW-RECORD          PIC X(100).
+
+      *--- RPTOUT record layout ---------------------------------------*
+      *    132 characters = standard printer line width               *
+       FD  RPTOUT
+           LABEL RECORDS ARE OMITTED
+           RECORD CONTAINS 132 CHARACTERS.
+       01  RPT-LINE            PIC X(132).
+
+      *================================================================*
+       WORKING-STORAGE SECTION.
+
+      *--- Shared defect record layout from copybook ------------------*
+      *    DEFECTRECS lives in QCPYSRC - defines DR- fields used       *
+      *    by both QMASBATCH and QMASINT                               *
+           COPY DEFECTRECS OF QCPYSRC.
+
+      *--- File status codes ------------------------------------------*
+      *    '00' = success, anything else = error                       *
+       01  WS-IN-STATUS        PIC XX   VALUE SPACES.
+       01  WS-RPT-STATUS       PIC XX   VALUE SPACES.
+
+      *--- EOF flag and screen hold -----------------------------------*
+      *    WS-EOF-FLAG drives the main read loop                       *
+      *    WS-HOLD used with ACCEPT to keep screen open after run      *
+       01  WS-EOF-FLAG         PIC X    VALUE 'N'.
+       01  WS-HOLD             PIC X    VALUE SPACES.
+
+      *--- Raw input line buffer --------------------------------------*
+      *    Each record from CSVIN is read into this field first        *
+       01  WS-RAW-LINE         PIC X(100).
+
+      *--- UNSTRING work fields ---------------------------------------*
+      *    WS-UNSTR-PTR tracks position in the raw line               *
+      *    WS-UNSTR-CNT counts how many fields were found             *
+       01  WS-UNSTR-PTR        PIC 9(3) VALUE 1.
+       01  WS-UNSTR-CNT        PIC 9(2) VALUE 0.
+
+      *--- Parsed CSV fields ------------------------------------------*
+      *    All defined as PIC X so they hold raw character data        *
+      *    before numeric conversion and validation                    *
+       01  RAW-FIELDS.
+           05  RAW-DEFID       PIC X(8).
+           05  RAW-LINE        PIC X(4).
+           05  RAW-PARTNO      PIC X(10).
+           05  RAW-TYPECD      PIC X(1).
+           05  RAW-TYPEDESC    PIC X(30).
+           05  RAW-SEV         PIC X(1).
+           05  RAW-BCOST       PIC X(11).
+           05  RAW-STAGE       PIC X(2).
+           05  RAW-RWK         PIC X(1).
+
+      *--- Valid STAGE values -----------------------------------------*
+      *    Hardcoded list per spec: RW=Raw Material, IP=In Process,    *
+      *    FG=Finished Goods                                           *
+       01  WS-VALID-STAGES.
+           05  WS-STAGE-RW     PIC X(2) VALUE 'RW'.
+           05  WS-STAGE-IP     PIC X(2) VALUE 'IP'.
+           05  WS-STAGE-FG     PIC X(2) VALUE 'FG'.
+
+      *--- Numeric conversion work fields ----------------------------*
+      *    Raw character fields are moved into these after validation  *
+      *    Plain PIC 9 (no COMP-3) used here to avoid MCH3601 errors  *
+      *    on IS NUMERIC checks with packed decimal fields             *
+       01  WS-BCOST-NUM        PIC 9(9)V99 VALUE ZERO.
+       01  WS-SEV-NUM          PIC 9(1)    VALUE ZERO.
+       01  WS-TYPECD-NUM       PIC 9(1)    VALUE ZERO.
+
+       01 WRKBCOST             PIC X(11).
+
+       01 I                    PIC 99.
+
+       01 J                    PIC 99.
+
+      *--- Validation flag and error message -------------------------*
+      *    RECORD-VALID is reset to 'Y' at the start of each record   *
+      *    Set to 'N' if any validation check fails                   *
+       01  RECORD-VALID        PIC X     VALUE 'Y'.
+       01  WS-ERROR-MSG        PIC X(60) VALUE SPACES.
+
+      *--- TCOST subprogram linkage area -----------------------------*
+      *    This group is passed to QMASTCOST via CALL ... USING        *
+      *    LP-BCOST and LP-SEV go IN, LP-TCOST comes back OUT         *
+      *    LP-RETURN-CODE: 0=OK, 1=SEV not found, 2=STAGE not found,  *
+      *    9=SQL error in subprogram                                   *
+       01  WS-TCOST-PARM.
+           05  LP-BCOST        PIC 9(9)V99.
+           05  LP-SEV          PIC 9(1).
+           05  LP-STAGE        PIC X(2).
+           05  LP-TCOST        PIC 9(11)V99.
+           05  LP-RETURN-CODE  PIC 9(2).
+
+      *--- SQL host variables ----------------------------------------*
+      *    S9 with COMP-3 (packed decimal) required for DB2 DECIMAL   *
+      *    columns - matches the internal storage format of DB2        *
+       01  HV-DEFID            PIC X(8).
+       01  HV-LINE             PIC X(4).
+       01  HV-PARTNO           PIC X(10).
+       01  HV-TYPECD           PIC S9(2)    USAGE COMP-3.
+       01  HV-TYPEDESC         PIC X(30).
+       01  HV-SEV              PIC S9(1)    USAGE COMP-3.
+       01  HV-BCOST            PIC S9(9)V99 USAGE COMP-3.
+       01  HV-STAGE            PIC X(2).
+       01  HV-RWK              PIC X(1).
+       01  HV-TCOST            PIC S9(11)V99 USAGE COMP-3.
+
+      *--- SQL row count ---------------------------------------------*
+      *    SQLERRD(3) returns number of rows affected by UPDATE        *
+      *    Used to detect whether UPDATE hit a row or missed (= 0)    *
+       01  WS-SQL-ROWCOUNT     PIC S9(9) USAGE COMP-3 VALUE ZERO.
+
+      *--- SQL communication area ------------------------------------*
+      *    SQLCA provides SQLCODE after every SQL statement            *
+      *    SQLCODE 0 = success, 100 = not found, negative = error     *
+           EXEC SQL
+               INCLUDE SQLCA
+           END-EXEC.
+
+      *--- Batch counters --------------------------------------------*
+       01  WS-TOTAL-COUNT      PIC 9(6)     VALUE ZERO.
+       01  WS-LOADED-COUNT     PIC 9(6)     VALUE ZERO.
+       01  WS-ERROR-COUNT      PIC 9(6)     VALUE ZERO.
+       01  WS-TOTAL-VALUE      PIC 9(11)V99 VALUE ZERO.
+       01  OUT-TOTAL-VALUE     PIC 9(11).99 VALUE ZERO.
+
+
+      *--- Report line layouts ---------------------------------------*
+       01  RPT-HEADER.
+           05  FILLER          PIC X(5)   VALUE SPACES.
+           05  FILLER          PIC X(50)
+               VALUE '  QMAS - QUALITY METRICS & ANALYSIS SYSTEM'.
+           05  FILLER          PIC X(77)
+               VALUE '     DEFECT LOAD CONTROL REPORT'.
+
+       01  RPT-COL-HDR.
+           05  FILLER          PIC X(5)  VALUE SPACES.
+           05  FILLER          PIC X(4)  VALUE 'SEQ '.
+           05  FILLER          PIC X(10) VALUE 'DEFID     '.
+           05  FILLER          PIC X(10) VALUE 'STATUS    '.
+           05  FILLER          PIC X(60) VALUE 'MESSAGE'.
+           05  FILLER          PIC X(43) VALUE SPACES.
+
+       01  RPT-DETAIL.
+           05  RDL-SEQ         PIC ZZZ9.
+           05  FILLER          PIC X(2)  VALUE SPACES.
+           05  RDL-DEFID       PIC X(8).
+           05  FILLER          PIC X(2)  VALUE SPACES.
+           05  RDL-STATUS      PIC X(8).
+           05  FILLER          PIC X(2)  VALUE SPACES.
+           05  RDL-MSG         PIC X(60).
+           05  FILLER          PIC X(46) VALUE SPACES.
+
+       01  RPT-BLANK           PIC X(132) VALUE SPACES.
+
+       01  RPT-TOTAL-LINE.
+           05  FILLER          PIC X(5)  VALUE SPACES.
+           05  FILLER          PIC X(30)
+               VALUE 'TOTAL RECORDS PROCESSED:      '.
+           05  RTL-TOTAL       PIC ZZZZ9.
+           05  FILLER          PIC X(88) VALUE SPACES.
+
+       01  RPT-LOADED-LINE.
+           05  FILLER          PIC X(5)  VALUE SPACES.
+           05  FILLER          PIC X(30)
+               VALUE 'TOTAL RECORDS LOADED:         '.
+           05  RTL-LOADED      PIC ZZZZ9.
+           05  FILLER          PIC X(88) VALUE SPACES.
+
+       01  RPT-REJECT-LINE.
+           05  FILLER          PIC X(5)  VALUE SPACES.
+           05  FILLER          PIC X(30)
+               VALUE 'TOTAL RECORDS REJECTED:       '.
+           05  RTL-REJECTED    PIC ZZZZ9.
+           05  FILLER          PIC X(88) VALUE SPACES.
+
+       01  RPT-VALUE-LINE.
+           05  FILLER          PIC X(5)  VALUE SPACES.
+           05  FILLER          PIC X(30)
+               VALUE 'TOTAL FINANCIAL VALUE LOADED: '.
+           05  RTL-VALUE       PIC Z(9)9.99.
+           05  FILLER          PIC X(84) VALUE SPACES.
+
+      *================================================================*
+       PROCEDURE DIVISION.
+
+      *----------------------------------------------------------------*
+       0000-MAIN.
+      *    Top-level driver paragraph. Controls the overall program
+      *    flow by calling three paragraphs in sequence. All logic
+      *    lives in the called paragraphs - nothing is assumed to
+      *    fall through here.
+           PERFORM 1000-INIT
+           PERFORM 2000-PROCESS
+           PERFORM 9000-WRAPUP
+           STOP RUN.
+
+           PERFORM 0000-EXIT.
+
+       0000-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       1000-INIT.
+      *    Opens CSVIN and RPTOUT. Stops the program if CSVIN cannot
+      *    be opened (status 00 = success). Writes the report header
+      *    lines, then reads and discards the first record in CSVIN
+      *    because it is a column header row (DEFID,LINE,PARTNO...).
+           OPEN INPUT  CSVIN
+           OPEN OUTPUT RPTOUT
+
+           IF WS-IN-STATUS NOT = '00'
+               DISPLAY 'ERROR OPENING CSVIN: ' WS-IN-STATUS
+               STOP RUN
+           END-IF
+
+      *> Write report header block to RPTOUT spool file
+           WRITE RPT-LINE FROM RPT-HEADER
+           WRITE RPT-LINE FROM RPT-BLANK
+           WRITE RPT-LINE FROM RPT-COL-HDR
+           WRITE RPT-LINE FROM RPT-BLANK
+
+      *> Discard the CSV column header row before processing begins
+           READ CSVIN INTO WS-RAW-LINE
+               AT END MOVE 'Y' TO WS-EOF-FLAG
+           END-READ
+
+           PERFORM 1000-EXIT.
+
+       1000-EXIT.
+           EXIT.
+
+      *================================================================*
+       2000-PROCESS.
+      *    Main read loop. Reads CSVIN one record at a time inside a
+      *    PERFORM UNTIL loop. For each record:
+      *      2100-PARSE-CSV   splits the raw line into fields
+      *      2200-VALIDATE    checks required fields and stage code
+      *      2300-CALC-TCOST  calls QMASTCOST subprogram
+      *      2400-UPSERT-DB   writes to DEFECTPF via SQL
+      *      2500-LOG-SUCCESS writes a LOADED line to the report
+      *      2600-LOG-ERROR   writes a REJECTED line to the report
+      *    WS-TOTAL-COUNT increments for every record read regardless
+      *    of whether it loaded or was rejected.
+           PERFORM UNTIL WS-EOF-FLAG = 'Y'
+
+               READ CSVIN INTO WS-RAW-LINE
+                   AT END
+                       MOVE 'Y' TO WS-EOF-FLAG
+               END-READ
+
+               IF WS-EOF-FLAG NOT = 'Y'
+
+                   ADD 1 TO WS-TOTAL-COUNT
+
+                   PERFORM 2100-PARSE-CSV
+                   PERFORM 2200-VALIDATE
+
+                   IF RECORD-VALID = 'Y'
+                       PERFORM 2300-CALC-TCOST
+
+                       IF LP-RETURN-CODE = 0
+                           PERFORM 2400-UPSERT-DB
+                       ELSE
+                           MOVE 'N'                 TO RECORD-VALID
+                           MOVE 'TCOST CALC FAILED' TO WS-ERROR-MSG
+                           PERFORM 2600-LOG-ERROR
+                       END-IF
+                   ELSE
+                       PERFORM 2600-LOG-ERROR
+                   END-IF
+
+               END-IF
+
+           END-PERFORM
+
+           PERFORM 2000-EXIT.
+
+       2000-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       2100-PARSE-CSV.
+      *    Uses UNSTRING to split WS-RAW-LINE on commas into the
+      *    9 RAW-FIELDS defined above. WS-UNSTR-PTR and WS-UNSTR-CNT
+      *    are reset before each call so previous values do not carry
+      *    over from the previous record. WS-UNSTR-CNT tells us how
+      *    many fields were found - checked in 2200-VALIDATE to catch
+      *    short or malformed records.
+           MOVE 1      TO WS-UNSTR-PTR
+           MOVE 0      TO WS-UNSTR-CNT
+           MOVE SPACES TO RAW-FIELDS
+
+           UNSTRING WS-RAW-LINE
+               DELIMITED BY ','
+               INTO RAW-DEFID
+                    RAW-LINE
+                    RAW-PARTNO
+                    RAW-TYPECD
+                    RAW-TYPEDESC
+                    RAW-SEV
+                    RAW-BCOST
+                    RAW-STAGE
+                    RAW-RWK
+               WITH POINTER WS-UNSTR-PTR
+               TALLYING IN  WS-UNSTR-CNT
+           END-UNSTRING
+
+           PERFORM 2100-EXIT.
+
+       2100-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       2200-VALIDATE.
+      *    Validates each parsed field. RECORD-VALID is reset to 'Y'
+      *    at the start of each call. On the first failure found,
+      *    RECORD-VALID is set to 'N', WS-ERROR-MSG is populated, and
+      *    GO TO 2200-EXIT skips remaining checks so the record is not
+      *    processed further. Valid records end with numeric fields
+      *    moved into WS-BCOST-NUM, WS-SEV-NUM, and WS-TYPECD-NUM
+      *    ready for use by 2300-CALC-TCOST and 2400-UPSERT-DB.
+           MOVE 'Y'    TO RECORD-VALID
+           MOVE SPACES TO WS-ERROR-MSG
+
+      *> Check UNSTRING found all 9 expected fields
+           IF WS-UNSTR-CNT < 9
+               MOVE 'N'                   TO RECORD-VALID
+               MOVE 'FEWER THAN 9 FIELDS' TO WS-ERROR-MSG
+               GO TO 2200-EXIT
+           END-IF
+
+      *> DEFID cannot be blank - it is the primary key of DEFECTPF
+           IF RAW-DEFID = SPACES
+               MOVE 'N'              TO RECORD-VALID
+               MOVE 'DEFID IS BLANK' TO WS-ERROR-MSG
+               GO TO 2200-EXIT
+           END-IF
+
+      *> STAGE must be one of three hardcoded valid values per spec
+           IF RAW-STAGE NOT = WS-STAGE-RW AND
+              RAW-STAGE NOT = WS-STAGE-IP AND
+              RAW-STAGE NOT = WS-STAGE-FG
+               MOVE 'N'                     TO RECORD-VALID
+               MOVE 'STAGE NOT IN RW IP FG' TO WS-ERROR-MSG
+               GO TO 2200-EXIT
+           END-IF
+
+      *> Move character fields to numeric work fields.
+      *> Validate and convert BCOST - must be a positive number
+      *  with up to 2 decimals
+           MOVE ZEROES TO WRKBCOST.
+           MOVE 11 TO J.
+
+           PERFORM VARYING I FROM 11 BY -1 UNTIL I < 1
+               IF RAW-BCOST(I:1) >= "0"
+                   AND RAW-BCOST(I:1) <= "9"
+                   IF J >= 1
+                       MOVE RAW-BCOST(I:1) TO WRKBCOST(J:1)
+                       SUBTRACT 1 FROM J
+                   END-IF
+               END-IF
+           END-PERFORM.
+
+           MOVE WRKBCOST TO WS-BCOST-NUM
+           COMPUTE WS-BCOST-NUM = WS-BCOST-NUM / 100
+
+           MOVE RAW-SEV    TO WS-SEV-NUM
+           MOVE RAW-TYPECD TO WS-TYPECD-NUM
+
+           PERFORM 2200-EXIT.
+
+       2200-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       2300-CALC-TCOST.
+      *    Loads the linkage parm group WS-TCOST-PARM and calls
+      *    subprogram QMASTCOST. The subprogram looks up SEV and STAGE
+      *    multipliers from QRSC.SEVERITY and QRSC.DETSTAGE then
+      *    calculates: TCOST = BCOST x SEV_VALUE x STAGE_VALUE.
+      *    LP-RETURN-CODE is checked by 2000-PROCESS after this call:
+      *      0 = success
+      *      1 = SEV code not found in QRSC.SEVERITY
+      *      2 = STAGE code not found in QRSC.DETSTAGE
+      *      9 = SQL error inside subprogram
+           MOVE WS-BCOST-NUM   TO LP-BCOST
+           MOVE WS-SEV-NUM     TO LP-SEV
+           MOVE RAW-STAGE      TO LP-STAGE
+           MOVE ZERO           TO LP-TCOST
+           MOVE ZERO           TO LP-RETURN-CODE
+
+           CALL 'QMASTCOST' USING WS-TCOST-PARM
+
+           PERFORM 2300-EXIT.
+
+       2300-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       2400-UPSERT-DB.
+      *    Try INSERT first. -803 means duplicate key so do UPDATE.
+      *    EVALUATE ensures only one path executes per record.
+           MOVE RAW-DEFID      TO HV-DEFID
+           MOVE RAW-LINE       TO HV-LINE
+           MOVE RAW-PARTNO     TO HV-PARTNO
+           MOVE WS-TYPECD-NUM  TO HV-TYPECD
+           MOVE RAW-TYPEDESC   TO HV-TYPEDESC
+           MOVE WS-SEV-NUM     TO HV-SEV
+           MOVE WS-BCOST-NUM   TO HV-BCOST
+           MOVE RAW-STAGE      TO HV-STAGE
+           MOVE RAW-RWK        TO HV-RWK
+           MOVE LP-TCOST       TO HV-TCOST
+
+      *> Attempt INSERT first
+           EXEC SQL
+               INSERT INTO DEFECTPF
+                   (DEFID,    LINE,     PARTNO,   TYPECD,
+                    TYPEDESC, SEV,      BCOST,    STAGE,
+                    RWK,      TCOST)
+               VALUES
+                   (:HV-DEFID,    :HV-LINE,     :HV-PARTNO,
+                    :HV-TYPECD,   :HV-TYPEDESC, :HV-SEV,
+                    :HV-BCOST,    :HV-STAGE,    :HV-RWK,
+                    :HV-TCOST)
+           END-EXEC
+
+           EVALUATE SQLCODE
+
+      *> INSERT clean success
+               WHEN 0
+                   PERFORM 2500-LOG-SUCCESS
+                   ADD 1        TO WS-LOADED-COUNT
+                   ADD LP-TCOST TO WS-TOTAL-VALUE
+
+      *> INSERT warning - still succeeded
+               WHEN 7
+                   PERFORM 2500-LOG-SUCCESS
+                   ADD 1        TO WS-LOADED-COUNT
+                   ADD LP-TCOST TO WS-TOTAL-VALUE
+
+      *> Duplicate key - record exists, do UPDATE
+               WHEN -803
+                   EXEC SQL
+                       UPDATE DEFECTPF
+                       SET    LINE     = :HV-LINE,
+                              PARTNO   = :HV-PARTNO,
+                              TYPECD   = :HV-TYPECD,
+                              TYPEDESC = :HV-TYPEDESC,
+                              SEV      = :HV-SEV,
+                              BCOST    = :HV-BCOST,
+                              STAGE    = :HV-STAGE,
+                              RWK      = :HV-RWK,
+                              TCOST    = :HV-TCOST
+                       WHERE  DEFID    = :HV-DEFID
+                   END-EXEC
+
+                   IF SQLCODE = 0 OR SQLCODE = 7
+                       PERFORM 2500-LOG-SUCCESS
+                       ADD 1        TO WS-LOADED-COUNT
+                       ADD LP-TCOST TO WS-TOTAL-VALUE
+                   ELSE
+                       MOVE 'N'             TO RECORD-VALID
+                       MOVE 'UPDATE FAILED' TO WS-ERROR-MSG
+                       PERFORM 2600-LOG-ERROR
+                   END-IF
+
+      *> Any other SQLCODE is an unexpected INSERT error
+               WHEN OTHER
+                   MOVE 'N'             TO RECORD-VALID
+                   MOVE 'INSERT FAILED' TO WS-ERROR-MSG
+                   PERFORM 2600-LOG-ERROR
+
+           END-EVALUATE.
+
+           PERFORM 2400-EXIT.
+
+       2400-EXIT.
+           EXIT.
+      *----------------------------------------------------------------*
+       2500-LOG-SUCCESS.
+      *    Writes a LOADED detail line to the control report.
+      *    RDL-SEQ  = record sequence number (total count so far)
+      *    RDL-DEFID = the defect ID that was processed
+      *    RDL-STATUS = 'LOADED  '
+      *    RDL-MSG  = blank for successfully loaded records
+           MOVE WS-TOTAL-COUNT TO RDL-SEQ
+           MOVE RAW-DEFID      TO RDL-DEFID
+           MOVE 'LOADED  '     TO RDL-STATUS
+           MOVE SPACES         TO RDL-MSG
+           WRITE RPT-LINE FROM RPT-DETAIL
+
+           PERFORM 2500-EXIT.
+
+       2500-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       2600-LOG-ERROR.
+      *    Writes a REJECTED detail line to the control report and
+      *    DISPLAYs the error to the job log for quick diagnosis.
+      *    WS-ERROR-MSG must be populated by the caller before this
+      *    paragraph is called so the reason appears in the report.
+           ADD 1               TO WS-ERROR-COUNT
+           MOVE WS-TOTAL-COUNT TO RDL-SEQ
+           MOVE RAW-DEFID      TO RDL-DEFID
+           MOVE 'REJECTED'     TO RDL-STATUS
+           MOVE WS-ERROR-MSG   TO RDL-MSG
+           WRITE RPT-LINE FROM RPT-DETAIL
+           DISPLAY 'REJECTED: ' WS-ERROR-MSG ' | ' RAW-DEFID
+
+           PERFORM 2600-EXIT.
+
+       2600-EXIT.
+           EXIT.
+
+      *================================================================*
+       9000-WRAPUP.
+      *    Writes the four control report total lines to RPTOUT, then
+      *    commits the SQL transaction so all inserts and updates are
+      *    permanently saved. Closes both files, then displays a
+      *    summary to the job log. ACCEPT WS-HOLD keeps the display
+      *    window open after the program completes so the operator can
+      *    review totals before pressing Enter to return to the command
+      *    line.
+           WRITE RPT-LINE FROM RPT-BLANK
+
+           MOVE WS-TOTAL-COUNT  TO RTL-TOTAL
+           WRITE RPT-LINE FROM RPT-TOTAL-LINE
+
+           MOVE WS-LOADED-COUNT TO RTL-LOADED
+           WRITE RPT-LINE FROM RPT-LOADED-LINE
+
+           MOVE WS-ERROR-COUNT  TO RTL-REJECTED
+           WRITE RPT-LINE FROM RPT-REJECT-LINE
+
+           MOVE WS-TOTAL-VALUE  TO RTL-VALUE
+           WRITE RPT-LINE FROM RPT-VALUE-LINE
+
+      *> Commit all SQL changes made during this run
+           EXEC SQL COMMIT END-EXEC
+
+           CLOSE CSVIN
+           CLOSE RPTOUT
+
+           DISPLAY '--- QMASBATCH COMPLETE ---'
+           DISPLAY 'TOTAL PROCESSED: ' WS-TOTAL-COUNT
+           DISPLAY 'TOTAL LOADED:    ' WS-LOADED-COUNT
+           DISPLAY 'TOTAL ERRORS:    ' WS-ERROR-COUNT
+           MOVE WS-TOTAL-VALUE TO OUT-TOTAL-VALUE
+           DISPLAY 'TOTAL VALUE:     ' OUT-TOTAL-VALUE
+
+      *> Hold display window open - press Enter to return to command
+           ACCEPT WS-HOLD
+
+           PERFORM 9000-EXIT.
+
+       9000-EXIT.
+           EXIT.
+
+      *================================================================*

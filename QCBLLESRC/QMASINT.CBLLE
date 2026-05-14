@@ -1,0 +1,381 @@
+      *================================================================*
+      * PROGRAM:  QMASINT                                              *
+      * PURPOSE:  QMAS Interactive Management Console                  *
+      * AUTHOR:   Robin Wynn                                           *
+      * DATE:     2026-05-09                                           *
+      *                                                                *
+      * SCREENS (QMASDSPF):                                            *
+      *   MENU01   - Screen 1: Filter entry                            *
+      *   SFLRCD   - Screen 2: Subfile record format                   *
+      *   SFLCTL   - Screen 2: Subfile control format                  *
+      *   DETAIL01 - Screen 3: Full defect detail                      *
+      *                                                                *
+      * FLOW:                                                          *
+      *   1. Display MENU01, accept filter values                      *
+      *   2. Query DEFECTPF with filters, load subfile                 *
+      *   3. Display SFLCTL/SFLRCD, accept option                      *
+      *   4. If opt=5, display DETAIL01 for selected record            *
+      *   5. F3=Exit anywhere, F12=Go Back one screen                  *
+      *================================================================*
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. QMASINT.
+       AUTHOR. Robin Wynn.
+
+      *================================================================*
+       ENVIRONMENT DIVISION.
+       INPUT-OUTPUT SECTION.
+       FILE-CONTROL.
+           SELECT QMASDSPF
+               ASSIGN TO WORKSTATION-QMASDSPF
+               ORGANIZATION    IS TRANSACTION
+               ACCESS MODE     IS DYNAMIC
+               RELATIVE KEY    IS WS-RECNUM
+               FILE STATUS     IS WS-DSP-STATUS.
+
+      *================================================================*
+       DATA DIVISION.
+       FILE SECTION.
+
+       FD  QMASDSPF.
+       01  DSP-REC.
+           COPY DDS-ALL-FORMATS OF QMASDSPF.
+
+      *================================================================*
+       WORKING-STORAGE SECTION.
+
+      *--- Shared defect record layout --------------------------------*
+           COPY DEFECTRECS OF QCPYSRC.
+
+      *--- File status ------------------------------------------------*
+       01  WS-DSP-STATUS       PIC XX.
+
+      *--- Subfile record number --------------------------------------*
+       01  WS-RECNUM           PIC 9(4) VALUE 0.
+
+      *--- Subfile page control ---------------------------------------*
+       01  WS-PAGE-SIZE        PIC 9(3) VALUE 5.
+
+      *--- Program flow -----------------------------------------------*
+       01  WS-DONE-SW          PIC X VALUE 'N'.
+       01  WS-CURRENT-SCREEN   PIC X(10) VALUE 'MENU'.
+       01  WS-TEMP             PIC X VALUE SPACE.
+
+      *--- Selected defect ID -----------------------------------------*
+       01  WS-SEL-DEFID        PIC X(8).
+
+      *--- Filter values ----------------------------------------------*
+       01  WS-FILT-LINE        PIC X(4)  VALUE SPACES.
+       01  WS-FILT-SEV         PIC X(1)  VALUE SPACES.
+       01  WS-FILT-STAGE       PIC X(2)  VALUE SPACES.
+
+      *--- SQL host variables -----------------------------------------*
+       01  HV-DEFID            PIC X(8).
+       01  HV-LINE             PIC X(4).
+       01  HV-PARTNO           PIC X(10).
+       01  HV-TYPECD           PIC S9(2)   USAGE COMP-3.
+       01  HV-TYPEDESC         PIC X(30).
+       01  HV-SEV              PIC S9(1)   USAGE COMP-3.
+       01  HV-BCOST            PIC S9(9)V99 USAGE COMP-3.
+       01  HV-STAGE            PIC X(2).
+       01  HV-RWK              PIC X(1).
+       01  HV-TCOST            PIC S9(11)V99 USAGE COMP-3.
+
+      *--- Filter host variables --------------------------------------*
+       01  HV-FILT-LINE        PIC X(4).
+       01  HV-FILT-SEV         PIC S9(1)   USAGE COMP-3.
+       01  HV-FILT-STAGE       PIC X(2).
+
+      *--- Blank comparison host variables ----------------------------*
+       01  HV-BLANK-LINE       PIC X(4)  VALUE '    '.
+       01  HV-BLANK-STAGE      PIC X(2)  VALUE '  '.
+       01  HV-NO-SEV           PIC S9(1) USAGE COMP-3 VALUE -1.
+
+      *--- Display formatted fields -----------------------------------*
+       01  WS-TCOST-DISP       PIC Z(9)9.99.
+       01  WS-BCOST-DISP       PIC Z(7)9.99.
+       01  WS-TYPECD-DISP      PIC Z9.
+       01  WS-SEV               PIC 9.
+
+      *--- SQL communication area -------------------------------------*
+           EXEC SQL
+               INCLUDE SQLCA
+           END-EXEC.
+
+      *================================================================*
+       PROCEDURE DIVISION.
+
+       0000-MAIN.
+           OPEN I-O QMASDSPF
+
+           IF WS-DSP-STATUS NOT = '00'
+               DISPLAY 'ERROR OPENING QMASDSPF: ' WS-DSP-STATUS
+               GOBACK
+           END-IF
+
+           PERFORM UNTIL WS-DONE-SW = 'Y'
+               EVALUATE WS-CURRENT-SCREEN
+
+                   WHEN 'MENU'
+                       PERFORM 1000-DISPLAY-MENU
+                       PERFORM 1100-HANDLE-MENU
+
+                   WHEN 'LIST'
+                       PERFORM 2000-LOAD-SUBFILE
+                       PERFORM 2100-DISPLAY-SUBFILE
+                       PERFORM 2200-HANDLE-OPTIONS
+
+                   WHEN 'DETAIL'
+                       PERFORM 3000-LOAD-DETAIL
+                       PERFORM 3100-DISPLAY-DETAIL
+
+               END-EVALUATE
+           END-PERFORM
+
+           CLOSE QMASDSPF
+           GOBACK.
+
+      *================================================================*
+      * SCREEN 1 - MENU / FILTER                                       *
+      *================================================================*
+       1000-DISPLAY-MENU.
+           MOVE SPACES TO DSP-REC
+
+           MOVE WS-FILT-LINE  TO FLTLINE  OF MENU01-O
+           MOVE WS-FILT-SEV   TO FLTSEV   OF MENU01-O
+           MOVE WS-FILT-STAGE TO FLTSTAGE OF MENU01-O
+
+           WRITE DSP-REC FORMAT IS 'MENU01'
+           READ QMASDSPF FORMAT IS 'MENU01'.
+
+       1100-HANDLE-MENU.
+           MOVE IN03 OF MENU01-I-INDIC TO WS-TEMP
+           IF WS-TEMP = '1'
+               MOVE 'Y' TO WS-DONE-SW
+               GO TO 1100-EXIT
+           END-IF
+
+           MOVE FLTLINE  OF MENU01-I TO WS-FILT-LINE
+           MOVE FLTSEV   OF MENU01-I TO WS-FILT-SEV
+           MOVE FLTSTAGE OF MENU01-I TO WS-FILT-STAGE
+
+           MOVE 'LIST' TO WS-CURRENT-SCREEN.
+
+       1100-EXIT.
+           EXIT.
+
+      *================================================================*
+      * SCREEN 2 - SUBFILE LIST                                        *
+      *================================================================*
+       2000-LOAD-SUBFILE.
+           MOVE SPACES TO DSP-REC
+           MOVE 0 TO WS-RECNUM
+
+      *> Clear subfile
+           MOVE '1' TO IN33 OF SFLCTL-O-INDIC
+           MOVE '0' TO IN31 OF SFLCTL-O-INDIC
+           MOVE '0' TO IN32 OF SFLCTL-O-INDIC
+           MOVE '0' TO IN34 OF SFLCTL-O-INDIC
+           WRITE DSP-REC FORMAT IS 'SFLCTL'
+           MOVE '0' TO IN33 OF SFLCTL-O-INDIC
+
+      *> Set filter header display
+           MOVE WS-FILT-LINE  TO HDLINE  OF SFLCTL-O
+           MOVE WS-FILT-SEV   TO HDSEV   OF SFLCTL-O
+           MOVE WS-FILT-STAGE TO HDSTAGE OF SFLCTL-O
+
+      *> Set up filter host variables
+           MOVE WS-FILT-LINE  TO HV-FILT-LINE
+           MOVE WS-FILT-STAGE TO HV-FILT-STAGE
+
+           IF WS-FILT-SEV = SPACES
+               MOVE -1          TO HV-FILT-SEV
+           ELSE
+               MOVE WS-FILT-SEV TO HV-FILT-SEV
+           END-IF
+
+      *> Open cursor and load rows
+           EXEC SQL
+               DECLARE DEFCURSOR CURSOR FOR
+                   SELECT DEFID, PARTNO, LINE, SEV, TCOST
+                   FROM   DEFECTPF
+                   WHERE  (LINE  = :HV-FILT-LINE
+                              OR :HV-FILT-LINE  = :HV-BLANK-LINE)
+                   AND    (SEV   = :HV-FILT-SEV
+                              OR :HV-FILT-SEV   = :HV-NO-SEV)
+                   AND    (STAGE = :HV-FILT-STAGE
+                              OR :HV-FILT-STAGE = :HV-BLANK-STAGE)
+                   ORDER  BY DEFID
+           END-EXEC
+
+           EXEC SQL OPEN DEFCURSOR END-EXEC
+
+           PERFORM 2000-FETCH-LOOP
+               UNTIL SQLCODE NOT = 0
+
+           EXEC SQL CLOSE DEFCURSOR END-EXEC.
+
+       2000-FETCH-LOOP.
+           EXEC SQL
+               FETCH DEFCURSOR
+               INTO  :HV-DEFID,
+                     :HV-PARTNO,
+                     :HV-LINE,
+                     :HV-SEV,
+                     :HV-TCOST
+           END-EXEC
+
+      *    IF SQLCODE NOT = 0
+      *        GO TO 2000-FETCH-EXIT
+      *    END-IF
+
+           ADD 1 TO WS-RECNUM
+
+           MOVE SPACES        TO DSP-REC
+           MOVE SPACES        TO SFLOPT  OF SFLRCD-O
+           MOVE HV-DEFID      TO SFLDEFID  OF SFLRCD-O
+           MOVE HV-PARTNO     TO SFLPARTNO OF SFLRCD-O
+           MOVE HV-LINE       TO SFLLINE   OF SFLRCD-O
+           MOVE HV-TCOST      TO WS-TCOST-DISP
+           MOVE WS-TCOST-DISP TO SFLTCOST  OF SFLRCD-O
+
+      *> Convert numeric SEV to character for display
+           MOVE HV-SEV        TO WS-TYPECD-DISP
+           MOVE WS-TYPECD-DISP TO SFLSEV   OF SFLRCD-O
+
+           WRITE SUBFILE DSP-REC FORMAT IS 'SFLRCD'.
+
+      *2000-FETCH-EXIT.
+      *    EXIT.
+
+      *----------------------------------------------------------------*
+       2100-DISPLAY-SUBFILE.
+           IF WS-RECNUM = 0
+               DISPLAY 'NO RECORDS FOUND FOR FILTERS'
+               MOVE 'MENU' TO WS-CURRENT-SCREEN
+               GO TO 2100-EXIT
+           END-IF
+
+           MOVE '1' TO IN31 OF SFLCTL-O-INDIC
+           MOVE '1' TO IN32 OF SFLCTL-O-INDIC
+           MOVE '0' TO IN33 OF SFLCTL-O-INDIC
+           MOVE '1' TO IN34 OF SFLCTL-O-INDIC
+
+           WRITE DSP-REC FORMAT IS 'SFLCTL'
+           READ QMASDSPF FORMAT IS 'SFLCTL'.
+
+       2100-EXIT.
+           EXIT.
+
+      *----------------------------------------------------------------*
+       2200-HANDLE-OPTIONS.
+      *> F3 to exit
+           MOVE IN03 OF SFLCTL-I-INDIC TO WS-TEMP
+           IF WS-TEMP = '1'
+               MOVE 'Y' TO WS-DONE-SW
+      *        GO TO 2200-EXIT
+           END-IF
+
+           MOVE IN12 OF SFLCTL-I-INDIC TO WS-TEMP
+           IF WS-TEMP = '1'
+               MOVE 'MENU' TO WS-CURRENT-SCREEN
+      *        GO TO 2200-EXIT
+           END-IF
+
+           MOVE IN05 OF SFLCTL-I-INDIC TO WS-TEMP
+           IF WS-TEMP = '1'
+      *        GO TO 2200-EXIT
+                CONTINUE
+           END-IF
+
+      *> Scan subfile for option 5
+           PERFORM VARYING WS-RECNUM FROM 1 BY 1
+               UNTIL WS-RECNUM > WS-PAGE-SIZE
+
+               READ SUBFILE QMASDSPF NEXT MODIFIED RECORD
+                   FORMAT IS 'SFLRCD'
+      *            AT END
+      *                GO TO 2200-EXIT
+               END-READ
+
+               IF SFLOPT OF SFLRCD-I = '5'
+                   MOVE SFLDEFID OF SFLRCD-I TO WS-SEL-DEFID
+                   MOVE 'DETAIL' TO WS-CURRENT-SCREEN
+      *            GO TO 2200-EXIT
+               END-IF
+           END-PERFORM.
+
+       2200-EXIT.
+           EXIT.
+
+      *================================================================*
+      * SCREEN 3 - DETAIL DRILL-DOWN                                   *
+      *================================================================*
+       3000-LOAD-DETAIL.
+           MOVE WS-SEL-DEFID TO HV-DEFID
+
+           EXEC SQL
+               SELECT DEFID,   LINE,     PARTNO,   TYPECD,
+                      TYPEDESC, SEV,      BCOST,    STAGE,
+                      RWK,      TCOST
+               INTO   :HV-DEFID,    :HV-LINE,     :HV-PARTNO,
+                      :HV-TYPECD,   :HV-TYPEDESC, :HV-SEV,
+                      :HV-BCOST,    :HV-STAGE,    :HV-RWK,
+                      :HV-TCOST
+               FROM   RWYNN01.DEFECTPF
+               WHERE  DEFID = :HV-DEFID
+           END-EXEC
+
+           IF SQLCODE NOT = 0
+               DISPLAY 'RECORD NOT FOUND: ' WS-SEL-DEFID
+               MOVE 'LIST' TO WS-CURRENT-SCREEN
+           END-IF.
+
+       3100-DISPLAY-DETAIL.
+           MOVE SPACES TO DSP-REC
+
+           MOVE HV-DEFID    TO DTDEFID   OF DETAIL01-O
+           MOVE HV-LINE     TO DTLINE    OF DETAIL01-O
+           MOVE HV-PARTNO   TO DTPARTNO  OF DETAIL01-O
+           MOVE HV-TYPEDESC TO DTTYPEDESC OF DETAIL01-O
+           MOVE HV-STAGE    TO DTSTAGE   OF DETAIL01-O
+           MOVE HV-RWK      TO DTRWK     OF DETAIL01-O
+
+           MOVE HV-TYPECD   TO WS-TYPECD-DISP
+           MOVE WS-TYPECD-DISP TO DTTYPECD OF DETAIL01-O
+
+           MOVE HV-BCOST    TO WS-BCOST-DISP
+           MOVE WS-BCOST-DISP TO DTBCOST  OF DETAIL01-O
+
+           MOVE HV-TCOST    TO WS-TCOST-DISP
+           MOVE WS-TCOST-DISP TO DTTCOST  OF DETAIL01-O
+
+           MOVE HV-SEV      TO WS-SEV
+           MOVE WS-SEV TO DTSEV   OF DETAIL01-O
+
+      *> CRITICAL ESCAPE: SEV=1 and STAGE=FG
+           IF HV-SEV = 1 AND HV-STAGE = 'FG'
+               MOVE '1' TO IN50 OF DETAIL01-O-INDIC
+           ELSE
+               MOVE '0' TO IN50 OF DETAIL01-O-INDIC
+           END-IF
+
+           WRITE DSP-REC FORMAT IS 'DETAIL01'
+           READ  QMASDSPF FORMAT IS 'DETAIL01'
+
+           MOVE '0' TO WS-TEMP
+
+      *> F3 to exit
+           MOVE IN03 OF DETAIL01-I-INDIC TO WS-TEMP
+           IF WS-TEMP = '1'
+               MOVE 'Y' TO WS-DONE-SW
+               GO TO 3100-EXIT
+           END-IF
+
+      *> F12 goes back to list
+           MOVE IN12 OF DETAIL01-I-INDIC TO WS-TEMP
+           IF WS-TEMP = '1'
+               MOVE 'LIST' TO WS-CURRENT-SCREEN
+           END-IF.
+
+       3100-EXIT.
+           EXIT.

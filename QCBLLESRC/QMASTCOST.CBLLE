@@ -1,0 +1,159 @@
+      *================================================================*
+      * PROGRAM:  QMASTCOST                                            *
+      * PURPOSE:  TCOST Calculation Subprogram                         *
+      *           Looks up SEV and STAGE multipliers from DB2 tables   *
+      *           in QRSC library, then computes:                      *
+      *             TCOST = BCOST * SEV_MULT * STAGE_MULT              *
+      *                                                                *
+      * CALLED BY: QMASBATCH                                           *
+      *                                                                *
+      * LINKAGE PARMS (WS-TCOST-PARM in caller):                       *
+      *   LP-BCOST        PIC 9(9)V99    - Base cost from CSV          *
+      *   LP-SEV          PIC 9(1)       - Severity code               *
+      *   LP-STAGE        PIC X(2)       - Stage code (RW/IP/FG)       *
+      *   LP-TCOST        PIC 9(11)V99   - Calculated total cost OUT   *
+      *   LP-RETURN-CODE  PIC 9(2)       - 0=OK, 1=SEV not found,      *
+      *                                    2=STAGE not found,          *
+      *                                    9=SQL error                 *
+      *================================================================*
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID.    QMASTCOST.
+       AUTHOR.        Robin Wynn.
+      *================================================================*
+       ENVIRONMENT DIVISION.
+
+      *================================================================*
+       DATA DIVISION.
+
+      *================================================================*
+       WORKING-STORAGE SECTION.
+
+      *--- SQL host variables -----------------------------------------*
+      * Column names confirmed from QRSC schema:                       *
+      *   SEVERITY:  SEVERITY_CODE DECIMAL, SEVERITY_VALUE DECIMAL     *
+      *   DETSTAGE:  STAGE_CODE CHAR(2),    STAGE_VALUE DECIMAL        *
+       01  HV-SEVCODE          PIC S9(1)      USAGE COMP-3.
+       01  HV-STAGECODE        PIC X(2).
+       01  HV-SEVVAL           PIC S9(5)V9(4) USAGE COMP-3.
+       01  HV-STAGEVAL         PIC S9(5)V9(4) USAGE COMP-3.
+
+      *--- SQL communication area -------------------------------------*
+           EXEC SQL
+               INCLUDE SQLCA
+           END-EXEC.
+
+      *--- Intermediate calculation work field ------------------------*
+       01  WS-CALC-TCOST       PIC 9(11)V99 VALUE ZERO.
+
+
+       01 OUT-BCOST        PIC 9(9).99.
+       01 OUT-TCOST        PIC 9(11).99.
+
+      *================================================================*
+       LINKAGE SECTION.
+
+       01  LK-PARM.
+           05  LP-BCOST        PIC 9(9)V99.
+           05  LP-SEV          PIC 9(1).
+           05  LP-STAGE        PIC X(2).
+           05  LP-TCOST        PIC 9(11)V99.
+           05  LP-RETURN-CODE  PIC 9(2).
+
+      *================================================================*
+       PROCEDURE DIVISION USING LK-PARM.
+
+      *----------------------------------------------------------------*
+       0000-SUBMAIN.
+           PERFORM 1000-INIT
+           PERFORM 2000-LOOKUP-SEV-MULT
+           IF LP-RETURN-CODE = 0
+               PERFORM 3000-LOOKUP-STAGE-MULT
+           END-IF
+           IF LP-RETURN-CODE = 0
+               PERFORM 4000-CALC-TCOST
+           END-IF
+           GOBACK.
+
+      *----------------------------------------------------------------*
+       1000-INIT.
+           MOVE ZERO     TO LP-TCOST
+           MOVE ZERO     TO LP-RETURN-CODE
+           MOVE ZERO     TO HV-SEVVAL
+           MOVE ZERO     TO HV-STAGEVAL
+           MOVE LP-SEV   TO HV-SEVCODE
+           MOVE LP-STAGE TO HV-STAGECODE.
+
+      *----------------------------------------------------------------*
+      * 2000-LOOKUP-SEV-MULT                                           *
+      * Fetch the severity multiplier from QRSC.SEVERITY               *
+      *                                                                *
+      * Actual table structure:                                        *
+      *   QRSC.SEVERITY (SEVERITY_CODE DECIMAL, SEVERITY_VALUE DECIMAL)*
+      *----------------------------------------------------------------*
+       2000-LOOKUP-SEV-MULT.
+           EXEC SQL
+               SELECT SEVERITY_VALUE
+               INTO   :HV-SEVVAL
+               FROM   QRSC.SEVERITY
+               WHERE  SEVERITY_CODE = :HV-SEVCODE
+           END-EXEC
+
+           EVALUATE SQLCODE
+               WHEN 0
+                   CONTINUE
+               WHEN 100
+                   DISPLAY 'QMASTCOST: SEV CODE NOT FOUND: '
+                       HV-SEVCODE
+                   MOVE 1 TO LP-RETURN-CODE
+               WHEN OTHER
+                   DISPLAY 'QMASTCOST: SQL ERROR ON SEV LOOKUP: '
+                       SQLCODE
+                   MOVE 9 TO LP-RETURN-CODE
+           END-EVALUATE.
+
+      *----------------------------------------------------------------*
+      * 3000-LOOKUP-STAGE-MULT                                         *
+      * Fetch the stage multiplier from QRSC.DETSTAGE                  *
+      *                                                                *
+      * Actual table structure:                                        *
+      *   QRSC.DETSTAGE (STAGE_CODE CHAR(2), STAGE_VALUE DECIMAL)      *
+      *----------------------------------------------------------------*
+       3000-LOOKUP-STAGE-MULT.
+           EXEC SQL
+               SELECT STAGE_VALUE
+               INTO   :HV-STAGEVAL
+               FROM   QRSC.DETSTAGE
+               WHERE  STAGE_CODE = :HV-STAGECODE
+           END-EXEC
+
+           EVALUATE SQLCODE
+               WHEN 0
+                   CONTINUE
+               WHEN 100
+                   DISPLAY 'QMASTCOST: STAGE CODE NOT FOUND: '
+                       HV-STAGECODE
+                   MOVE 2 TO LP-RETURN-CODE
+               WHEN OTHER
+                   DISPLAY 'QMASTCOST: SQL ERROR ON STAGE LOOKUP: '
+                       SQLCODE
+                   MOVE 9 TO LP-RETURN-CODE
+           END-EVALUATE.
+
+      *----------------------------------------------------------------*
+      * 4000-CALC-TCOST                                                *
+      * TCOST = BCOST * SEVERITY_VALUE * STAGE_VALUE                   *
+      *----------------------------------------------------------------*
+       4000-CALC-TCOST.
+           COMPUTE WS-CALC-TCOST =
+               LP-BCOST * HV-SEVVAL * HV-STAGEVAL
+
+           MOVE WS-CALC-TCOST TO LP-TCOST
+           MOVE LP-BCOST TO OUT-BCOST
+           MOVE LP-TCOST TO OUT-TCOST
+           DISPLAY 'QMASTCOST: DEFECT COSTED - '
+               ' BCOST='     OUT-BCOST
+               ' SEV-VAL='   HV-SEVVAL
+               ' STG-VAL='   HV-STAGEVAL
+               ' TCOST='     OUT-TCOST.
+
+      *================================================================*
