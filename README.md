@@ -214,4 +214,4 @@ Mississippi Coding Academies
 
 ## 📄 Documentation
 
-See [`docs/QMAS_RunSheet.pdf`](docs/QMAS_RunSheet.pdf) for the full operational run sheet including compile instructions, scheduling, screen navigation, and troubleshooting.
+See [`docs/QMAS_RunSheet.pdf`](docs/QMAS-RunSheet.pdf) for the full operational run sheet including compile instructions, scheduling, screen navigation, and troubleshooting.
