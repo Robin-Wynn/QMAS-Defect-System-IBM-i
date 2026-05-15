@@ -6,12 +6,22 @@
 
 ## 📋 Project Overview
 
+> 🎬 **[Watch the live demo on YouTube](https://youtu.be/4kH2d-W_2O0)**
+
 QMAS is a production-style IBM i application that solves a real manufacturing problem: getting defect data off the shop floor, calculating its true financial impact, and putting it in front of the managers who need to act on it.
 
 The system has two sides:
 
 - **Batch side** — reads a CSV file of defect records, validates each one, calls a subprogram to calculate total cost using severity and stage multipliers from a DB2 lookup table, then upserts every record into a DB2 physical file.
 - **Interactive side** — a classic 5250 green-screen interface where shop floor managers can filter defects by production line, severity, and detection stage, browse a scrollable list, and drill into individual records. Critical defects that escaped to finished goods trigger a reverse-image warning on screen.
+
+---
+
+## 🎬 Live Demo
+
+[![QMAS Demo](https://img.youtube.com/vi/4kH2d-W_2O0/0.jpg)]((https://youtu.be/4kH2d-W_2O0))
+
+Watch QMAS in action — batch job execution, 5250 green-screen filtering, subfile navigation, and the Critical Escape warning.
 
 ---
 
